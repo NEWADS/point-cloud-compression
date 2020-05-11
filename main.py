@@ -20,8 +20,9 @@ def main(argv):
         reduce_point=True,
     )
     data.plot_scatter3()
-    data.dct3(quantization_bit=5)
-    # Indeed, lower quantization_bit would lead to lower compression rate.
+    # data.dct3(quantization_bit=6, compress_size=220)
+    # data.linearcoding(code_depth=16)
+    data.dpcm(mode='linear', code_depth=16)
 
 
 if __name__ == '__main__':
