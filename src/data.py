@@ -177,7 +177,7 @@ class Pointcloud:
             return compressed_size / scatter_size
 
         def _d1halfing_fast(pmin, pmax, cd):
-            return np.linspace(pmin, pmax, 1 << cd + 1)
+            return np.linspace(pmin, pmax, 1 << cd)
 
         def _resampling(ppoints, cd):
             x_min = np.amin(ppoints[:, 0])
@@ -232,8 +232,12 @@ class Pointcloud:
                 compressed_size += sys.getsizeof(i)
             return compressed_size / scatter_size
 
-        def _d1halfing_fast(pmin, pmax, cd):
-            return np.linspace(pmin, pmax, 1 << cd + 1)
+        def _quantizer(cd):
+            # in light of laplace distribution, we will put most quantization points arount zero.
+            minus = np.linspace(-512, -1, 1 << cd - 2, endpoint=False)
+            central = np.linspace(-1, 1, 1 << cd - 1, endpoint=False)
+            positive = np.linspace(1, 512, 1 << cd - 2)
+            return np.concatenate([minus, central, positive], 0)
 
         def _predictor(prefix: np.ndarray, md='linear'):
             # predictor for next coordinates mode can be linear or constant
@@ -244,28 +248,30 @@ class Pointcloud:
             return output
 
         def _predictive_coding(scatters: np.ndarray, cd: int, md: str):
+            # quantization will be performed based on preselected linearspace
             pred = []
+            axis = _quantizer(cd)
+            feedback = []
             for i in range(scatters.shape[0]):
+                # quantization first.
                 if i < 2:
-                    pred.append(scatters[i])
+                    tmp = np.searchsorted(axis, scatters[i], side='right') - 1
+                    pred.append(tmp)
+                    # feedback.append(scatters[i] - axis[tmp])
+                    feedback.append([0, 0, 0])
                 else:
-                    pred.append(scatters[i] - _predictor(scatters[i-2:i], md))
-
+                    # feedback loop will start working at i = 2.
+                    # please pay attention that when i < 2 predictor doesn't work, hence no feedback;
+                    # when i >= 2, feedback represents prediction result, i.e. quantization error with prediction error
+                    # will be put into pred matrix.
+                    value = np.array([axis[pred[i-2]], axis[pred[i-1]]])
+                    tmp0 = _predictor(np.array(value+feedback[i-2:i]), md)
+                    tmp = np.searchsorted(axis, scatters[i] - tmp0, side='right') - 1
+                    pred.append(tmp)
+                    feedback.append(tmp0)
             pred = np.array(pred)
-            # quantization
-            x_min = np.amin(pred[:, 0])
-            x_max = np.amax(pred[:, 0])
-            y_min = np.amin(pred[:, 1])
-            y_max = np.amax(pred[:, 1])
-            z_min = np.amin(pred[:, 2])
-            z_max = np.amax(pred[:, 2])
-            xletra = _d1halfing_fast(x_min, x_max, cd)
-            yletra = _d1halfing_fast(y_min, y_max, cd)
-            zletra = _d1halfing_fast(z_min, z_max, cd)
-            otcodex = np.searchsorted(xletra, pred[:, 0], side='right') - 1  # establish tree using this.
-            otcodey = np.searchsorted(yletra, pred[:, 1], side='right') - 1
-            otcodez = np.searchsorted(zletra, pred[:, 2], side='right') - 1
-            return [[otcodex, otcodey, otcodez], x_min, x_max, y_min, y_max, z_min, z_max]
+            # plt.hist(pred[1000:1500, 0], bins=100)
+            return pred, axis
 
         def _reverse_coding(pred: np.ndarray):
             # when reconstruct performing, it will reverse from last point, hense first point is original coordinate.
@@ -280,27 +286,20 @@ class Pointcloud:
 
         # Compression
         data = self.scatter
-        occ = _predictive_coding(data, md=mode, cd=code_depth)
-        coef = occ[0]
+        coef, quantizer = _predictive_coding(data, md=mode, cd=code_depth)
         # Huffman Coding
-        byte_stream_x = HuffmanCoding(data=coef[0]).compression()
-        byte_stream_y = HuffmanCoding(data=coef[1]).compression()
-        byte_stream_z = HuffmanCoding(data=coef[2]).compression()
+        byte_stream_x = HuffmanCoding(data=coef[:, 0]).compression()
+        byte_stream_y = HuffmanCoding(data=coef[:, 1]).compression()
+        byte_stream_z = HuffmanCoding(data=coef[:, 2]).compression()
         # compression ratio
         self.tmp.metrics.append(_compute_ratio([byte_stream_x, byte_stream_y, byte_stream_z], data))
-        quantizer = np.array([code_depth, occ[1], occ[2], occ[3], occ[4], occ[5], occ[6]])  # depth and boundary
+        # self.tmp.metrics.append(1)
         self.tmp.coef = coef
         self.tmp.quantizer.append(quantizer)
 
         # Decompression
-        x_axis = _d1halfing_fast(quantizer[1], quantizer[2], code_depth)
-        y_axis = _d1halfing_fast(quantizer[3], quantizer[4], code_depth)
-        z_axis = _d1halfing_fast(quantizer[5], quantizer[6], code_depth)
-        koorx = x_axis[coef[0]]
-        koory = y_axis[coef[1]]
-        koorz = z_axis[coef[2]]
-        koor = np.array([koorx, koory, koorz]).T
-        decoef = _reverse_coding(koor)
+        decoded = np.array([quantizer[coef[:, 0]], quantizer[coef[:, 1]], quantizer[coef[:, 2]]])
+        decoef = _reverse_coding(decoded.T)
 
         self.tmp.decoef = decoef
         self.tmp.scatter = decoef

@@ -22,7 +22,7 @@ def main(argv):
     data.plot_scatter3()
     # data.dct3(quantization_bit=6, compress_size=220)
     # data.linearcoding(code_depth=16)
-    data.dpcm(mode='linear', code_depth=16)
+    data.dpcm(mode='linear', code_depth=8)
 
 
 if __name__ == '__main__':
